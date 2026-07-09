@@ -19,11 +19,11 @@ import torch
 from absl import flags
 from ml_collections import config_flags
 
-from jgnn import datasets, training
+from jgnn import training
 from jgnn.models import NPE, GNNEmbedding
 from jgnn.transforms import build_transformation
 from jgnn.callbacks.visualization import NPEVisualizationCallback
-
+import datasets
 
 def save_config_snapshot(
     config: ml_collections.ConfigDict, snapshot_dir: Path, config_path: str = None,

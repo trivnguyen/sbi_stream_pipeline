@@ -39,6 +39,7 @@ R_AAU = np.array([
     [0.51616778, -0.70514011, 0.4861566],
     [0.18176238, 0.64487142, 0.74236331],
 ])
+NODE_FEATURE_NAMES = ['phi1', 'phi2', 'dist', 'pm1', 'pm2', 'vr']
 
 
 def _load_fixed_data():
@@ -69,29 +70,55 @@ def _load_fixed_data():
 
 POT_TOTAL, STREAM_UNPERTURB, META, DISTRIB_STRIPPING = _load_fixed_data()
 
-NODE_FEATURE_NAMES = ['phi1', 'phi2', 'dist', 'pm1', 'pm2', 'vr']
-
 
 def _init_worker(sample_threads: int) -> None:
     """Pool initializer: run once in each worker process at startup."""
     agama.setNumThreads(sample_threads)
 
 
+def _time_stripping_for(num_particles: int) -> np.ndarray:
+    """time_stripping array for `num_particles`.
+
+    `create_particle_spray_stream` requires len(time_stripping) ==
+    num_particles // 2 + 1 exactly. DISTRIB_STRIPPING is fixed at
+    META['num_particles'] particles' worth; a smaller num_particles
+    subsamples it (evenly spaced indices) down to the required length -
+    num_particles can't exceed META['num_particles'], since there's
+    nothing to subsample from beyond the fixed array.
+
+    Args:
+        num_particles: Requested particle count.
+
+    Returns:
+        time_stripping array of length num_particles // 2 + 1.
+    """
+    if num_particles == META['num_particles']:
+        return DISTRIB_STRIPPING
+    if num_particles > META['num_particles']:
+        raise ValueError(
+            f"num_particles={num_particles} exceeds the fixed snapshot's "
+            f"META['num_particles']={META['num_particles']}; "
+            'DISTRIB_STRIPPING has no more points to subsample from.')
+    target_len = num_particles // 2 + 1
+    idx = np.linspace(0, len(DISTRIB_STRIPPING) - 1, target_len).round().astype(int)
+    return DISTRIB_STRIPPING[idx]
+
+
 def simulate_one(
     theta: np.ndarray,
+    num_particles: int | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Simulate one perturbed stream realization.
 
     Runs in a worker process. Defined at module level so it can be
     pickled and sent to worker processes by `ProcessPoolExecutor`.
 
-    NOTE: Always simulates with META['num_particles'] particles:
-    DISTRIB_STRIPPING is a fixed array whose length must equal exactly
-    num_particles // 2 + 1
-
     Args:
         theta: Length-9 physical-unit row, ordered per [log_mass, log_radius, v_perp,
             v_para, angle_pos, angle_delta, impact_param, time, phi1].
+        num_particles: Number of stream particles to simulate. Defaults to
+            the fixed snapshot's META['num_particles'] if not given; see
+            `_time_stripping_for` for how smaller counts are handled.
 
     Returns:
         (theta, feats) if accepted, or (None, None) if the simulation
@@ -109,6 +136,8 @@ def simulate_one(
     time_impact = -time_before_present  # Gyr, sign-flipped (impact is in the past)
     delta_phi1 = 0.5  # fixed
     time_window = sims_utils.compute_time_window(v_perp, v_para, impact_parameter_kpc)
+    num_particles = num_particles if num_particles is not None else META['num_particles']
+    time_stripping = _time_stripping_for(num_particles)
 
     try:
         pert_dict = sims_utils.create_perturber_dict(
@@ -125,11 +154,11 @@ def simulate_one(
             scaleradius=META['prog_scaleradius_kpc'],
             prog_pot_kind='Plummer',
             sat_cen_present=META['prog_wtoday'],
-            num_particles=META['num_particles'],
+            num_particles=num_particles,
             time_end=0.0,
             time_total=META['Age_stream_Gyr'],
             save_rate=1,
-            time_stripping=DISTRIB_STRIPPING,
+            time_stripping=time_stripping,
             add_perturber=pert_dict,
             verbose=False,
             dissolve_progenitor=True,
@@ -151,6 +180,7 @@ def run_simulation_batch(
     n_jobs: int = 0,
     use_multiprocessing: bool = True,
     sample_threads: int = 1,
+    num_particles: int | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Simulate a batch of stream realizations, keeping only successes.
 
@@ -163,6 +193,8 @@ def run_simulation_batch(
             (useful for debugging).
         sample_threads: OpenMP threads each worker process may use
             internally for agama calls.
+        num_particles: Number of stream particles per simulation; see
+            `simulate_one`.
 
     Returns:
         Tuple of (theta, feats_list): `theta` is the (n_success, 9)
@@ -175,7 +207,7 @@ def run_simulation_batch(
 
     if not use_multiprocessing:
         for row in tqdm(theta, total=len(theta), desc='Simulating'):
-            row_out, feats = simulate_one(row)
+            row_out, feats = simulate_one(row, num_particles)
             if feats is not None:
                 theta_list.append(row_out)
                 feats_list.append(feats)
@@ -186,7 +218,7 @@ def run_simulation_batch(
         max_workers=n_workers, initializer=_init_worker,
         initargs=(sample_threads,),
     ) as pool:
-        futures = [pool.submit(simulate_one, row) for row in theta]
+        futures = [pool.submit(simulate_one, row, num_particles) for row in theta]
         for fut in tqdm(as_completed(futures), total=len(futures), desc='Simulating'):
             row_out, feats = fut.result()
             if feats is not None:
@@ -219,7 +251,7 @@ def write_graph_dataset(
         headers: Extra scalar attributes to store (e.g. round, tau).
     """
     theta = np.asarray(theta)
-    n_particles = [feats.shape[0] for feats in feats_list]
+    n_particles = np.array([feats.shape[0] for feats in feats_list])
     ptr = np.cumsum([0] + n_particles)
     stacked = np.concatenate(feats_list, axis=0)
 

@@ -84,8 +84,8 @@ def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
     train_loader, val_loader, norm_dict = datasets.cartesian.prepare_dataloaders(
         node_feats,
         graph_feats,
+        config.feat_labels,
         config.labels,
-        cond_labels=config.get('cond_labels', None),
         train_batch_size=config.train_batch_size,
         eval_batch_size=config.eval_batch_size,
         train_frac=config.train_frac,

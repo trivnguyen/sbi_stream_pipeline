@@ -99,6 +99,12 @@ def parse_args() -> argparse.Namespace:
         help='Maximum number of successful simulations stored in each '
              'output HDF5 file.')
     parser.add_argument(
+        '--num-particles', type=int, default=None,
+        help='Number of stream particles to simulate per realization '
+             '(default: the fixed snapshot count, stream_sims.sims.META '
+             '["num_particles"]). Must not exceed the default; smaller '
+             'counts subsample the fixed stripping-time distribution.')
+    parser.add_argument(
         '--seed', type=int, default=None,
         help='Random seed for reproducibility.')
     parser.add_argument(
@@ -179,7 +185,7 @@ def main() -> None:
         initargs=(args.sample_threads,),
     ) as pool:
         pending = {
-            pool.submit(sims.simulate_one, p)
+            pool.submit(sims.simulate_one, p, args.num_particles)
             for p in itertools.islice(param_stream, max_pending)
         }
         with tqdm(total=args.n_sims, desc='Simulating') as pbar:
@@ -197,7 +203,8 @@ def main() -> None:
                             _flush()
                     next_item = next(param_stream, None)
                     if next_item is not None:
-                        pending.add(pool.submit(sims.simulate_one, next_item))
+                        pending.add(
+                            pool.submit(sims.simulate_one, next_item, args.num_particles))
 
     _flush()
 

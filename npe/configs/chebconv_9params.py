@@ -14,6 +14,7 @@ def get_config():
     config.data_root = '/scratch/tvnguyen/stream_datasets/'
     config.data_name = '9p_AAU'
     config.num_datasets = 20
+    config.feat_labels = ('phi1', 'phi2', 'vr', 'pm1', 'pm2', 'dist')
     config.labels = (
         'log_mass', 'log_radius', 'v_rel_perp', 'v_rel_para', 'angle_pos_impact',
         'angle_vel_delta', 'impact_param', 'time_impact', 'phi1_impact_today'
@@ -22,7 +23,7 @@ def get_config():
     config.num_workers = 0
 
     ## LOGGING AND WANDB CONFIGURATION ###
-    config.wandb_project = '8p_ZhaoPlumCOM'
+    config.wandb_project = '9p_AAU'
     config.workdir = '/scratch/tvnguyen/trained_models/npe'
     config.entity = "desc_sbi_stream"
     config.name = None
@@ -36,7 +37,7 @@ def get_config():
 
     ### MODEL CONFIGURATION ###
     config.model = model = ConfigDict()
-    model.input_size = 6
+    model.input_size = 10
     model.output_size = len(config.labels)
 
     # Embedding network configuration
@@ -73,7 +74,7 @@ def get_config():
     pre_transforms.apply_selection = False
     pre_transforms.apply_uncertainty = False
     pre_transforms.use_log_features = False
-    pre_transforms.recompute_graph_features = False
+    pre_transforms.recompute_node_features = False
     pre_transforms.graph_name = 'adaptive_knn'
     pre_transforms.graph_args = {'ratio': 0.2, 'loop': True}
 

@@ -22,7 +22,7 @@ not the full box - log_prior() accounts for this in its normalization.
 from collections.abc import Iterator
 
 import numpy as np
-from scipy.stats import uniform
+from scipy.stats import uniform, rv_discrete
 
 _G_UNITS = 4.302e-6  # kpc (km/s)^2 / Msun
 _DELTA_V_MIN = 3.0   # km/s, detectability cut
@@ -44,20 +44,53 @@ class Prior:
     """Prior distribution for the stream perturber parameters."""
 
     label_ordering = PARAM_NAMES
+    _prior_min_default = {
+        "log_mass": -1,
+        "log_radius": -2,
+        "v_rel_perp": 0,
+        "v_rel_para": -200,
+        "angle_pos_impact": 0,
+        "angle_vel_delta": -90,
+        "impact_param": 0.5,
+        "time_impact": 0.0,
+        "phi1_impact_today": -15,
+    }
+    _prior_max_default = {
+        "log_mass": np.log10(50),
+        "log_radius": np.log10(2.5),
+        "v_rel_perp": 200,
+        "v_rel_para": 200,
+        "angle_pos_impact": 180,
+        "angle_vel_delta": 90,
+        "impact_param": 5.0,
+        "time_impact": 0.45,
+        "phi1_impact_today": -8,
+    }
+
     # name -> column index, so accept()'s callers below never depend on
     # label_ordering's actual order - only on names.
     _idx = {name: i for i, name in enumerate(label_ordering)}
 
-    def __init__(self, seed=None):
-        self.log_mass_dist = uniform(-1, np.log10(50) - (-1))
-        self.log_radius_dist = uniform(-2, np.log10(2.5) - (-2))
-        self.v_rel_perp_dist = uniform(loc=0, scale=200)  # km/s
-        self.v_rel_para_dist = uniform(loc=-200, scale=400)  # km/s
-        self.angle_pos_impact_dist = uniform(loc=0, scale=180)  # deg
-        self.angle_vel_delta_dist = uniform(loc=-90, scale=180)  # deg
-        self.impact_param_dist = uniform(loc=0.5, scale=4.5)  # scale radii
-        self.time_impact_dist = uniform(loc=0., scale=0.45)  # Gyr ago
-        self.phi1_impact_today_dist = uniform(loc=-15, scale=7)  # deg
+    def __init__(self, prior_min=None, prior_max=None, seed=None):
+        """ Initialize the prior box, either from explicit bounds or from the default
+        """
+        if prior_min is None:
+            prior_min = self._prior_min_default
+        if prior_max is None:
+            prior_max = self._prior_max_default
+
+        self.prior_dist = {}
+        for label in prior_min.keys():
+            if label not in prior_max:
+                raise ValueError(f"Missing prior_max for {label}")
+            if label not in PARAM_NAMES:
+                raise ValueError(f"Unknown parameter {label}")
+
+            if prior_max[label] == prior_min[label]:
+                self.prior_dist[label] = rv_discrete(name='dirac', values=([prior_min[label]], [1.0]))
+            else:
+                self.prior_dist[label] = uniform(
+                    loc=prior_min[label], scale=prior_max[label] - prior_min[label])
 
         self.prior_min, self.prior_max = self._box_bounds()
         self.prior = uniform(self.prior_min, self.prior_max - self.prior_min)
@@ -71,7 +104,7 @@ class Prior:
         """
         prior_min, prior_max = [], []
         for label in self.label_ordering:
-            lo, hi = getattr(self, f'{label}_dist').support()
+            lo, hi = self.prior_dist[label].support()
             prior_min.append(lo)
             prior_max.append(hi)
         return np.array(prior_min), np.array(prior_max)

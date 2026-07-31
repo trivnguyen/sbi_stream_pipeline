@@ -76,7 +76,9 @@ def _init_worker(sample_threads: int) -> None:
     agama.setNumThreads(sample_threads)
 
 
-def _time_stripping_for(num_particles: int) -> np.ndarray:
+def _time_stripping_for(
+    num_particles: int, rng: np.random.Generator | None = None
+) -> np.ndarray:
     """time_stripping array for `num_particles`.
 
     `create_particle_spray_stream` requires len(time_stripping) ==
@@ -86,27 +88,78 @@ def _time_stripping_for(num_particles: int) -> np.ndarray:
     num_particles can't exceed META['num_particles'], since there's
     nothing to subsample from beyond the fixed array.
 
+    With `rng`, the times are instead drawn from DISTRIB_STRIPPING's
+    empirical distribution by inverse-CDF sampling, so each stream gets its
+    own release times rather than the one fixed set. Interpolating the
+    quantiles (rather than picking array entries) keeps the draws distinct,
+    which the spline over the progenitor orbit requires.
+
     Args:
         num_particles: Requested particle count.
+        rng: Generator to draw release times from. None reproduces the
+            fixed, evenly-spaced subsample.
 
     Returns:
         time_stripping array of length num_particles // 2 + 1.
     """
-    if num_particles == META['num_particles']:
-        return DISTRIB_STRIPPING
     if num_particles > META['num_particles']:
         raise ValueError(
             f"num_particles={num_particles} exceeds the fixed snapshot's "
             f"META['num_particles']={META['num_particles']}; "
             'DISTRIB_STRIPPING has no more points to subsample from.')
+
     target_len = num_particles // 2 + 1
+    if rng is not None:
+        # rng.random() is [0, 1), so the draws stay inside the fixed array's
+        # range - create_particle_spray_stream rejects times >= time_end.
+        return np.sort(np.quantile(DISTRIB_STRIPPING, rng.random(target_len)))
+
+    if num_particles == META['num_particles']:
+        return DISTRIB_STRIPPING
     idx = np.linspace(0, len(DISTRIB_STRIPPING) - 1, target_len).round().astype(int)
     return DISTRIB_STRIPPING[idx]
+
+
+def _seeded_ic_method(rng: np.random.Generator):
+    """Wrap the default IC generator so it draws from `rng`.
+
+    `create_ic_particle_spray_chen2025` builds its own
+    `np.random.default_rng(0)` internally, so every call returns the same
+    escape offsets. `create_particle_spray_stream` picks the arguments it
+    forwards by inspecting the IC method's signature, so the wrapper must
+    mirror that signature exactly; `rng` is keyword-only and stays bound.
+
+    The swap is confined to the one call and undone in `finally`. Workers
+    are separate processes (see `run_simulation_batch`), so no other RNG
+    consumer can observe it.
+
+    Args:
+        rng: Generator supplying the escape-offset draws.
+
+    Returns:
+        Callable suitable for `create_particle_spray_stream`'s
+        `create_ic_method`.
+    """
+    stock = nbody.fast_sims.create_ic_particle_spray_chen2025
+
+    def create_ic(orbit_sat, mass_sat, rj, R, G=None):
+        original = np.random.default_rng
+        np.random.default_rng = lambda *args, **kwargs: rng
+        try:
+            return stock(orbit_sat=orbit_sat, mass_sat=mass_sat, rj=rj, R=R,
+                         G=G)
+        finally:
+            np.random.default_rng = original
+
+    return create_ic
 
 
 def simulate_one(
     theta: np.ndarray,
     num_particles: int | None = None,
+    return_perturb: bool = False,
+    use_uniform_stripping_times: bool = False,
+    seed: int | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Simulate one perturbed stream realization.
 
@@ -119,6 +172,14 @@ def simulate_one(
         num_particles: Number of stream particles to simulate. Defaults to
             the fixed snapshot's META['num_particles'] if not given; see
             `_time_stripping_for` for how smaller counts are handled.
+        return_perturb: If True, return the full perturbed stream dict
+        use_uniform_stripping_times: If True, draw release times from a uniform distribution rather than the fixed snapshot's
+        seed: Randomizes the stream realization - both the release times
+            and the particle-spray escape offsets, which are otherwise
+            fixed for every theta (the spray seeds itself with 0
+            internally). None keeps that deterministic behaviour, so
+            theta -> stream stays a pure function and existing datasets
+            remain reproducible.
 
     Returns:
         (theta, feats) if accepted, or (None, None) if the simulation
@@ -137,7 +198,16 @@ def simulate_one(
     delta_phi1 = 0.5  # fixed
     time_window = sims_utils.compute_time_window(v_perp, v_para, impact_parameter_kpc)
     num_particles = num_particles if num_particles is not None else META['num_particles']
-    time_stripping = _time_stripping_for(num_particles)
+    rng = np.random.default_rng(seed) if seed is not None else None
+
+    if use_uniform_stripping_times:
+        time_stripping = None
+    else:
+        time_stripping = _time_stripping_for(num_particles, rng=rng)
+    # Omitted entirely when seed is None, so the spray keeps its own
+    # internal default_rng(0) and the output is unchanged.
+    spray_kwargs = {} if rng is None else {
+        'create_ic_method': _seeded_ic_method(rng)}
 
     try:
         pert_dict = sims_utils.create_perturber_dict(
@@ -162,6 +232,7 @@ def simulate_one(
             add_perturber=pert_dict,
             verbose=False,
             dissolve_progenitor=True,
+            **spray_kwargs,
         )
         coords = sims_utils.galcen_to_stream_coords(
             stream_perturb['part_xv'], R_AAU)
@@ -172,6 +243,9 @@ def simulate_one(
     valid = np.isfinite(feats).all(axis=1)
     if valid.sum() == 0:
         return None, None
+    if return_perturb:
+        return theta, feats[valid], stream_perturb
+
     return theta, feats[valid]
 
 
@@ -181,6 +255,7 @@ def run_simulation_batch(
     use_multiprocessing: bool = True,
     sample_threads: int = 1,
     num_particles: int | None = None,
+    seed: int | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Simulate a batch of stream realizations, keeping only successes.
 
@@ -195,6 +270,9 @@ def run_simulation_batch(
             internally for agama calls.
         num_particles: Number of stream particles per simulation; see
             `simulate_one`.
+        seed: Base seed for randomized stream realizations. Each row gets
+            its own spawned seed, so no two streams share a realization.
+            None keeps every stream deterministic given its theta.
 
     Returns:
         Tuple of (theta, feats_list): `theta` is the (n_success, 9)
@@ -205,9 +283,16 @@ def run_simulation_batch(
     theta = np.asarray(theta)
     theta_list, feats_list = [], []
 
+    if seed is None:
+        seeds = [None] * len(theta)
+    else:
+        seeds = [int(s.generate_state(1)[0])
+                 for s in np.random.SeedSequence(seed).spawn(len(theta))]
+
     if not use_multiprocessing:
-        for row in tqdm(theta, total=len(theta), desc='Simulating'):
-            row_out, feats = simulate_one(row, num_particles)
+        for row, row_seed in tqdm(
+                zip(theta, seeds), total=len(theta), desc='Simulating'):
+            row_out, feats = simulate_one(row, num_particles, seed=row_seed)
             if feats is not None:
                 theta_list.append(row_out)
                 feats_list.append(feats)
@@ -218,7 +303,8 @@ def run_simulation_batch(
         max_workers=n_workers, initializer=_init_worker,
         initargs=(sample_threads,),
     ) as pool:
-        futures = [pool.submit(simulate_one, row, num_particles) for row in theta]
+        futures = [pool.submit(simulate_one, row, num_particles, seed=s)
+                   for row, s in zip(theta, seeds)]
         for fut in tqdm(as_completed(futures), total=len(futures), desc='Simulating'):
             row_out, feats = fut.result()
             if feats is not None:

@@ -21,6 +21,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="Nbody_streams"
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 
 import time
+from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from glob import glob
 
@@ -47,6 +48,24 @@ def _init_worker(sample_threads: int = 1) -> None:
             process may use internally for agama calls.
     """
     agama.setNumThreads(sample_threads)
+
+
+def seed_stream(seq: np.random.SeedSequence) -> Iterator[int]:
+    """
+    Yield one independent simulator seed per simulation.
+
+    Children are spawned one at a time rather than all up front, so the
+    seeds stay as lazy as prior.iter_params; SeedSequence keeps its own
+    child counter, so repeated single spawns are still independent.
+
+    Args:
+        seq: Parent sequence to spawn per-simulation children from.
+
+    Yields:
+        Seeds, in submission order.
+    """
+    while True:
+        yield int(seq.spawn(1)[0].generate_state(1)[0])
 
 
 def save_config(
@@ -129,8 +148,15 @@ def main() -> None:
         args.seed = int(np.random.SeedSequence().generate_state(1)[0])
     print(f'Using seed: {args.seed}')
 
-    prior_obj = prior.Prior(seed=args.seed)
-    param_stream = prior_obj.iter_params(args.n_sims)
+    # Two independent child streams off the one resolved seed: the prior
+    # draws, and the simulator's per-realization seeds. Without the
+    # latter, sims.simulate_one falls back to fixed release times and a
+    # spray that seeds itself with 0, so every stream in the dataset
+    # shares one stochastic realization and only theta varies.
+    prior_seq, sim_seq = np.random.SeedSequence(args.seed).spawn(2)
+
+    prior_obj = prior.Prior(seed=prior_seq)
+    task_stream = zip(prior_obj.iter_params(args.n_sims), seed_stream(sim_seq))
 
     theta_buffer: list[np.ndarray] = []
     feats_buffer: list[np.ndarray] = []
@@ -185,8 +211,8 @@ def main() -> None:
         initargs=(args.sample_threads,),
     ) as pool:
         pending = {
-            pool.submit(sims.simulate_one, p, args.num_particles)
-            for p in itertools.islice(param_stream, max_pending)
+            pool.submit(sims.simulate_one, p, args.num_particles, seed=s)
+            for p, s in itertools.islice(task_stream, max_pending)
         }
         with tqdm(total=args.n_sims, desc='Simulating') as pbar:
             while pending:
@@ -201,10 +227,12 @@ def main() -> None:
                         n_success += 1
                         if len(theta_buffer) >= args.sims_per_file:
                             _flush()
-                    next_item = next(param_stream, None)
+                    next_item = next(task_stream, None)
                     if next_item is not None:
-                        pending.add(
-                            pool.submit(sims.simulate_one, next_item, args.num_particles))
+                        next_theta, next_seed = next_item
+                        pending.add(pool.submit(
+                            sims.simulate_one, next_theta,
+                            args.num_particles, seed=next_seed))
 
     _flush()
 

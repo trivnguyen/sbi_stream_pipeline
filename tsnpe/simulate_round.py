@@ -107,6 +107,61 @@ def plot_corner(samples, labels, save_path, title, color='steelblue',
     print(f'[Plot] Saved corner plot -> {save_path}')
 
 
+PROPOSAL_FILES = ('proposal_phys.npy', 'posterior_phys.npy',
+                  'diagnostics.json', 'proposal_settings.json')
+
+
+def proposal_settings(config, prev_checkpoint):
+    """Everything that determines the proposal, for the resume check."""
+    return {
+        'proposal': dict(config.proposal),
+        'checkpoint': str(prev_checkpoint),
+        'seed': int(config.seed),
+        'round': int(config.round),
+    }
+
+
+def load_cached_proposal(round_dir, settings):
+    """Reuse a proposal a previous attempt already drew, if it still fits.
+
+    Drawing the proposal costs a checkpoint load, a tau calibration over
+    n_post_samples, and the sampling loop itself; the simulation that
+    follows is far longer and far more likely to be what hit the wall
+    clock. Re-running the whole step to get back to where it crashed is
+    pure waste, so the round's own files are reused when they exist.
+
+    Guarded on `proposal_settings`: a cache drawn under a different
+    n_sims, delta_vmin, sampling_mode or checkpoint describes a different
+    distribution, and silently simulating it would be worse than redoing
+    the work. Delete the round's .npy files to force a fresh draw.
+
+    Args:
+        round_dir: The round's directory.
+        settings: `proposal_settings` for the run about to happen.
+
+    Returns:
+        (proposal_phys, diagnostics, posterior_phys), or None to draw fresh.
+    """
+    if not all((round_dir / name).exists() for name in PROPOSAL_FILES):
+        return None
+
+    cached = json.loads((round_dir / 'proposal_settings.json').read_text())
+    if cached != settings:
+        changed = sorted(
+            k for k in set(cached) | set(settings)
+            if cached.get(k) != settings.get(k))
+        print(f'[Proposal] Ignoring the cached proposal in {round_dir}: '
+              f'{changed} changed since it was drawn.')
+        return None
+
+    proposal_phys = np.load(round_dir / 'proposal_phys.npy')
+    posterior_phys = np.load(round_dir / 'posterior_phys.npy')
+    diagnostics = json.loads((round_dir / 'diagnostics.json').read_text())
+    print(f'[Proposal] Reusing the proposal already drawn in {round_dir} '
+          f'({len(proposal_phys):,} draws); skipping the sampling step.')
+    return proposal_phys, diagnostics, posterior_phys
+
+
 def main(config):
     """Simulate round config.round's proposal draws.
 
@@ -148,37 +203,48 @@ def main(config):
     track_config = json.loads(state.track_config_path().read_text())
     prev_checkpoint = state.checkpoint_path(r - 1)
 
-    # Same projection the model was trained under. Without it the
-    # observation reaches the embedding as raw coordinates normalized by
-    # track-offset statistics, and the proposal is drawn from garbage.
-    track = (TrackProjection(
-        track_config['track_path'], track_config['feat_labels'],
-        project_pos=track_config.get('track_project_pos', True))
-        if track_config.get('track_path') else None)
-    print(f'[Track] {track}')
+    settings = proposal_settings(config, prev_checkpoint)
+    cached = load_cached_proposal(round_dir, settings)
 
-    print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
-    # pre_transforms=None: sample_tsnpe_proposal always builds its own
-    # observation-only pre_transforms and passes it explicitly, so the
-    # model never falls back to a self.pre_transforms of its own.
-    model = build_npe(model_config, None, norm_dict)
-    # weights_only=False: round >= 2 loads a full Lightning checkpoint, not
-    # just a state_dict; safe since it's always our own pipeline's output.
-    checkpoint = torch.load(prev_checkpoint, map_location='cpu', weights_only=False)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.eval()
+    if cached is not None:
+        proposal_phys, diagnostics, posterior_phys = cached
+    else:
+        # Same projection the model was trained under. Without it the
+        # observation reaches the embedding as raw coordinates normalized
+        # by track-offset statistics, and the proposal is garbage.
+        track = (TrackProjection(
+            track_config['track_path'], track_config['feat_labels'],
+            project_pos=track_config.get('track_project_pos', True))
+            if track_config.get('track_path') else None)
+        print(f'[Track] {track}')
 
-    print('[Proposal] Sampling TSNPE-truncated proposal...')
-    proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
-        model, target, norm_dict, pre_transforms_config, track=track,
-        return_posterior=True, **config.proposal)
-    print(f'  proposal_phys : {proposal_phys.shape}')
-    print(f'  diagnostics   : {diagnostics}')
+        print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
+        # pre_transforms=None: sample_tsnpe_proposal always builds its own
+        # observation-only pre_transforms and passes it explicitly, so the
+        # model never falls back to a self.pre_transforms of its own.
+        model = build_npe(model_config, None, norm_dict)
+        # weights_only=False: round >= 2 loads a full Lightning checkpoint,
+        # not just a state_dict; safe since it's always our own output.
+        checkpoint = torch.load(
+            prev_checkpoint, map_location='cpu', weights_only=False)
+        model.load_state_dict(checkpoint['state_dict'])
+        model.eval()
 
-    np.save(round_dir / 'proposal_phys.npy', proposal_phys)
-    np.save(round_dir / 'posterior_phys.npy', posterior_phys)
-    with open(round_dir / 'diagnostics.json', 'w') as f:
-        json.dump(diagnostics, f, indent=2)
+        print('[Proposal] Sampling TSNPE-truncated proposal...')
+        proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
+            model, target, norm_dict, pre_transforms_config, track=track,
+            return_posterior=True, **config.proposal)
+        print(f'  proposal_phys : {proposal_phys.shape}')
+        print(f'  diagnostics   : {diagnostics}')
+
+        # Settings last: it is what load_cached_proposal keys on, so it
+        # must not appear before the arrays it describes are on disk.
+        np.save(round_dir / 'proposal_phys.npy', proposal_phys)
+        np.save(round_dir / 'posterior_phys.npy', posterior_phys)
+        with open(round_dir / 'diagnostics.json', 'w') as f:
+            json.dump(diagnostics, f, indent=2)
+        with open(round_dir / 'proposal_settings.json', 'w') as f:
+            json.dump(settings, f, indent=2)
 
     truths = resolve_truths(config.target)
     if truths is not None:

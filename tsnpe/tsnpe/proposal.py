@@ -9,6 +9,8 @@ Reads the real target's observation, and computes the truncated proposal:
    directly from the posterior (sample_tsnpe_proposal)
 """
 
+import warnings
+
 import numpy as np
 import torch
 from scipy.special import logsumexp
@@ -266,7 +268,22 @@ def _sample_proposal_rejection(
           f'(drawn={n_drawn:,}, accepted={n_accepted:,})')
 
     proposal_phys = np.concatenate(accepted)[:n_sims]
+    if len(proposal_phys) < n_sims:
+        # The loop also exits on n_drawn >= n_max, and the truncation above
+        # then silently returns short. Loud, because the round trains on
+        # whatever comes back and nothing else would notice.
+        warnings.warn(
+            f'Proposal is short: {len(proposal_phys):,} of {n_sims:,} '
+            f'requested. Rejection sampling exhausted its budget of '
+            f'n_sims * oversample_cap = {n_max:,} draws at an acceptance '
+            f'rate of {acc_rate:.3e}; {int(np.ceil(n_sims / acc_rate)):,} '
+            f'draws would be needed. Raise oversample_cap, raise epsilon, '
+            f"or switch to sampling_mode='sir'.",
+            RuntimeWarning, stacklevel=2)
+        print(f'  WARNING: short proposal, {len(proposal_phys):,}/{n_sims:,}')
+
     diagnostics = dict(
+        n_requested=int(n_sims), n_returned=int(len(proposal_phys)),
         acceptance_rate=float(acc_rate),
         n_drawn=int(n_drawn), n_accepted=int(n_accepted))
     return proposal_phys, diagnostics
@@ -341,9 +358,23 @@ def _sample_proposal_sir(
     print(f'  SIR effective sample size: {ess_total:.1f} '
           f'(drawn={n_drawn:,}, total={len(theta_running):,})')
 
+    # SIR always returns n_sims rows -- it resamples with replacement -- so
+    # a short budget shows up as duplicated draws rather than a short
+    # array. ESS is the honest count, and the analogue of the rejection
+    # sampler's short-proposal case.
+    if ess_total < n_sims:
+        warnings.warn(
+            f'Proposal is effectively short: ESS {ess_total:.0f} of '
+            f'{n_sims:,} requested. SIR exhausted its budget of '
+            f'n_sims * oversample_cap = {n_sims * oversample_cap:,} draws, '
+            f'so the {n_sims:,} returned rows contain repeats. Raise '
+            f'oversample_cap or epsilon.',
+            RuntimeWarning, stacklevel=2)
+        print(f'  WARNING: ESS {ess_total:.0f} < n_sims {n_sims:,}')
+
     diagnostics = dict(
-        ess_total=float(ess_total), n_drawn=int(n_drawn),
-        n_total=int(len(theta_running)))
+        n_requested=int(n_sims), ess_total=float(ess_total),
+        n_drawn=int(n_drawn), n_total=int(len(theta_running)))
     return proposal_phys, diagnostics
 
 

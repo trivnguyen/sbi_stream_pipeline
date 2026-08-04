@@ -13,6 +13,8 @@ simulate_process.py   simulate training data (ProcessPoolExecutor; each
                        isolated agama state - no locking needed). Draws
                        theta from stream_sims.prior.Prior, simulates each
                        row with stream_sims.sims.simulate_one.
+simulate_process_cut.py  the same, with each realization's particles cut
+                       to a phi1/phi2 window (a survey footprint)
 train_npe.py           train the model
 configs/
   chebconv_9params.py   9-param perturber prior, AAU-frame node features
@@ -41,6 +43,31 @@ reproducibility (defaults to a fresh 32-bit seed, printed at startup and
 recorded in `config.<i>.json`); `--append` resumes into an existing output
 directory instead of overwriting it. `--max-pending` bounds in-flight
 simulations so memory stays flat regardless of `--n-sims`.
+
+`--seed` fixes the whole run, not just the prior: it also drives each
+realization's release times and particle-spray offsets, so no two streams
+in a dataset share a stochastic realization. Rerunning with the same
+`--seed` reproduces the dataset exactly.
+
+### Cut to an observing window
+
+```bash
+python simulate_process_cut.py \
+    --n-sims 100000 --n-workers 24 \
+    --output-dir /scratch/$USER/stream_datasets/9p_AAU_cut \
+    --phi1-min -20 --phi1-max 5 --phi2-min -1 --phi2-max 1
+```
+
+Identical to the above, except that each realization's particles are cut
+to a window in the AAU stream frame before being written. The default
+window is the `PHI1_RANGE` / `PHI2_RANGE` placeholders at the top of the
+script (both currently unbounded - fill them in); any bound left unset is
+unbounded, and `--no-cut` disables the cut entirely, reproducing
+`simulate_process.py` byte for byte at the same `--seed`. Realizations
+left with fewer than `--min-particles` surviving particles are dropped and
+reported separately. The window is recorded in `config.<i>.json` and as
+`phi1_min`/`phi1_max`/`phi2_min`/`phi2_max` HDF5 attributes (`nan` where
+unbounded).
 
 ## Train
 

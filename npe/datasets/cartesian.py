@@ -21,7 +21,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from tqdm import tqdm
 
-from jgnn.transforms import compute_norm_dict
+from transforms import compute_norm_dict
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +72,17 @@ def _build_graphs(node_feats, graph_feats, feat_labels, labels, max_graphs=None)
     return graphs
 
 
-def _compute_norm(graphs, pre_transform_kwargs):
+def _compute_norm(graphs, pre_transform_kwargs, track=None):
     """Compute normalization stats from a list of graphs.
 
     `x_loc`/`x_scale` come from actually running `graphs` through the
     pre_transform pipeline built from `pre_transform_kwargs` (see
-    `jgnn.transforms.compute_norm_dict`), rather than approximating them
-    from raw `pos`/`vel`.
+    `transforms.compute_norm_dict`), rather than approximating them from
+    raw `pos`/`vel`. With a `track`, that pipeline projects, so the stats
+    describe the offsets the model is actually fed.
     """
-    x_loc, x_scale = compute_norm_dict(graphs, **pre_transform_kwargs)
+    x_loc, x_scale = compute_norm_dict(
+        graphs, track=track, **pre_transform_kwargs)
 
     theta_all = torch.cat([g.theta for g in graphs], dim=0)
     theta_min = theta_all.min(dim=0)[0]
@@ -118,15 +120,20 @@ def _apply_norm(graphs, norm_dict, device, cond_labels=None):
 
 def prepare_dataloaders(
     node_feats, graph_feats, feat_labels, labels, train_frac=0.8, train_batch_size=32,
-    eval_batch_size=32, num_workers=1, norm_dict=None, seed=0, pre_transform_kwargs=None
+    eval_batch_size=32, num_workers=1, norm_dict=None, seed=0, pre_transform_kwargs=None,
+    track=None
 ):
     """Prepare train/val dataloaders from Cartesian phase-space node features.
 
     `pre_transform_kwargs` are the same kwargs passed to
-    `jgnn.transforms.build_transformation` (minus `norm_dict`). They're
+    `transforms.build_transformation` (minus `norm_dict`). They're
     required whenever `norm_dict` isn't already provided, since computing
     `x_loc`/`x_scale` means running the training graphs through that exact
     pipeline.
+
+    The graphs themselves stay in raw physical coordinates: `track` is
+    only needed to measure the normalization, since the model applies the
+    projection itself as the first stage of its own pre_transforms.
     """
     pl.seed_everything(seed)
 
@@ -145,7 +152,8 @@ def prepare_dataloaders(
                 'pre_transform_kwargs must be provided to compute norm_dict '
                 '(needed to run the real pre_transform pipeline).')
         print('Computing norm_dict from training graphs...')
-        norm_dict = _compute_norm(train_graphs, pre_transform_kwargs)
+        norm_dict = _compute_norm(
+            train_graphs, pre_transform_kwargs, track=track)
 
     _apply_norm(train_graphs, norm_dict, device)
     _apply_norm(val_graphs, norm_dict, device)

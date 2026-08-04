@@ -16,10 +16,38 @@ from torch_geometric.data import Data, Batch
 from tqdm import tqdm
 
 from .transforms import build_transformation
-from .prior import Prior
+from .prior import PARAM_NAMES, Prior
 from .target import TargetData
 
 _PRIOR = Prior()
+
+# Column indices of the four parameters Prior.accept takes, resolved by
+# name so a change to PARAM_NAMES' order cannot silently mis-apply the cut.
+_PRIOR_COLS = tuple(
+    PARAM_NAMES.index(name) for name in
+    ('log_mass', 'impact_param', 'v_rel_perp', 'v_rel_para'))
+
+
+def make_prior(delta_vmin=None):
+    """Prior with the detectability cut the training set was built with.
+
+    `delta_vmin` is a property of the *dataset*, not of the checkpoint, so
+    it cannot be recovered from the round-0 model and has to be given.
+    It lives in the simulator's dataset config as `delta_vmin` (e.g.
+    `<data_root>/<data_name>/config.0.json`). Getting it wrong silently
+    reshapes the proposal: the cut is
+    `2 G M / (b v_rel) > delta_vmin`, so raising it removes the low-mass,
+    large-impact-parameter corner and biases every proposal high in mass.
+
+    Args:
+        delta_vmin: Detectability threshold in km/s. None uses
+            `prior._DELTA_V_MIN`, which is 3.0 -- a hundred times the
+            0.03 the 9p_AAU_deltaVmin0p03 set was generated with.
+
+    Returns:
+        A `Prior`.
+    """
+    return _PRIOR if delta_vmin is None else Prior(delta_vmin=delta_vmin)
 
 
 def build_obs_pre_transforms(pre_transforms_config: dict, norm_dict: dict, track=None):
@@ -194,7 +222,7 @@ def estimate_tau(
 
 def _sample_proposal_rejection(
     model, graph_embedding: torch.Tensor, norm_dict: dict, tau: float,
-    n_sims: int, draw_batch: int, oversample_cap: int,
+    n_sims: int, draw_batch: int, oversample_cap: int, prior=None,
 ):
     """Rejection-sample the prior, keeping candidates whose log-density
     under the model is >= tau (Deistler et al. 2022). Because the proposal
@@ -218,7 +246,7 @@ def _sample_proposal_rejection(
 
     pbar = tqdm(total=n_sims, desc='Sampling proposal', unit='accepted')
     while n_accepted < n_sims and n_drawn < n_max:
-        cands_phys = _PRIOR.sample_prior(draw_batch)
+        cands_phys = prior.sample_prior(draw_batch)
         lq = _log_prob_candidates(model, graph_embedding, norm_dict, cands_phys)
         mask = lq >= tau
         if mask.any():
@@ -246,7 +274,7 @@ def _sample_proposal_rejection(
 
 def _sample_proposal_sir(
     model, graph_embedding: torch.Tensor, norm_dict: dict, tau: float,
-    n_sims: int, draw_batch: int, oversample_cap: int,
+    n_sims: int, draw_batch: int, oversample_cap: int, prior=None,
 ):
     """Sampling-importance-resampling directly from the posterior.
 
@@ -283,7 +311,15 @@ def _sample_proposal_sir(
         log_q = log_q.reshape(-1).cpu().numpy()
         theta = post_norm * theta_scale + theta_loc
 
-        in_tau = log_q >= tau
+        # The prior is uniform *on the region the detectability cut keeps*,
+        # not on the whole box, so a draw failing the cut has zero prior
+        # density and must get zero weight. Without this the rejection and
+        # SIR paths propose from different distributions -- SIR would hand
+        # the simulator perturbers the training set never contained.
+        in_box = _PRIOR_COLS is None or prior.accept(
+            theta[:, _PRIOR_COLS[0]], theta[:, _PRIOR_COLS[1]],
+            theta[:, _PRIOR_COLS[2]], theta[:, _PRIOR_COLS[3]])
+        in_tau = (log_q >= tau) & in_box
         logw = np.where(in_tau, -log_q, -np.inf)  # w propto 1{in S} / q (uniform prior)
         theta_running.append(theta)
         logw_running.append(logw)
@@ -323,6 +359,7 @@ def sample_tsnpe_proposal(
     draw_batch: int = 10_000,
     oversample_cap: int = 500,
     sampling_mode: str = 'rejection',
+    delta_vmin: float = None,
     return_posterior: bool = False,
 ):
     """Draw a TSNPE-truncated proposal for the next simulation round.
@@ -352,6 +389,11 @@ def sample_tsnpe_proposal(
         draw_batch: Candidates/posterior draws per sampling_mode batch.
         oversample_cap: Hard ceiling on draws = n_sims * oversample_cap.
         sampling_mode: 'rejection' or 'sir' - see above.
+        delta_vmin: Detectability cut in km/s for the proposal prior. Must
+            match the `delta_vmin` the training set was simulated with
+            (see the dataset's config.<n>.json) - it is a property of the
+            data, not of the checkpoint, so nothing can infer it. None
+            falls back to prior._DELTA_V_MIN (3.0).
         return_posterior: If True, also return the posterior samples drawn
             for tau calibration (see estimate_tau) - avoids a second,
             redundant sample_posterior call for diagnostics.
@@ -385,13 +427,17 @@ def sample_tsnpe_proposal(
     obs_graph = pre_transforms(Data(x=x, pos=pos))
     graph_embedding = _embed_observation(model, obs_graph)
 
+    prior = make_prior(delta_vmin)
+    print(f'  prior delta_vmin: {prior._delta_vmin} km/s '
+          f'(box acceptance {prior.acceptance_rate():.2%})')
+
     if sampling_mode == 'rejection':
         proposal_phys, diagnostics = _sample_proposal_rejection(
-            model, graph_embedding, norm_dict, tau,
+            model, graph_embedding, norm_dict, tau, prior=prior,
             n_sims=n_sims, draw_batch=draw_batch, oversample_cap=oversample_cap)
     elif sampling_mode == 'sir':
         proposal_phys, diagnostics = _sample_proposal_sir(
-            model, graph_embedding, norm_dict, tau,
+            model, graph_embedding, norm_dict, tau, prior=prior,
             n_sims=n_sims, draw_batch=draw_batch, oversample_cap=oversample_cap)
     else:
         raise ValueError(

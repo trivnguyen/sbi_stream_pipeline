@@ -15,6 +15,7 @@ import sys
 import warnings
 
 warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 # As npe/simulate_process.py: make single-threaded OpenMP the process-wide
 # default, so each of the n_jobs worker processes runs one thread instead
@@ -42,7 +43,45 @@ from stream_sims import prior
 from stream_sims.sims import run_simulation_batch, write_graph_dataset
 
 
-def plot_corner(samples, labels, save_path, title, color='steelblue'):
+def resolve_truths(target_config):
+    """Order `config.target.true_params` into `prior.PARAM_NAMES` order.
+
+    Keyed by name rather than taken positionally on purpose: a truth list
+    silently written in the wrong order would mark the wrong crosshairs on
+    every corner plot, and nothing downstream would notice.
+
+    Args:
+        target_config: `config.target`. `true_params` is optional -- a real
+            observation has no truth, and None means no crosshairs.
+
+    Returns:
+        A length-9 list in `prior.PARAM_NAMES` order, or None.
+
+    Raises:
+        ValueError: If `true_params` names a parameter that is not in
+            `prior.PARAM_NAMES`, or omits one that is.
+    """
+    true_params = target_config.get('true_params')
+    if not true_params:
+        return None
+
+    true_params = dict(true_params)
+    unknown = sorted(set(true_params) - set(prior.PARAM_NAMES))
+    if unknown:
+        raise ValueError(
+            f'config.target.true_params has unknown parameter(s) {unknown}; '
+            f'expected names from {prior.PARAM_NAMES}')
+    missing = [name for name in prior.PARAM_NAMES if name not in true_params]
+    if missing:
+        raise ValueError(
+            f'config.target.true_params is missing {missing}; give every '
+            'parameter or leave the whole field unset')
+
+    return [float(true_params[name]) for name in prior.PARAM_NAMES]
+
+
+def plot_corner(samples, labels, save_path, title, color='steelblue',
+                truths=None):
     """Save a corner plot of samples, physical units.
 
     Args:
@@ -51,12 +90,16 @@ def plot_corner(samples, labels, save_path, title, color='steelblue'):
         save_path: Destination image path.
         title: Plot title (N is appended automatically).
         color: corner.corner's `color`.
+        truths: Length-D true values to mark, or None. Use
+            `resolve_truths` rather than building this by hand -- it has
+            to be in the same column order as `samples`.
     """
     fig = corner.corner(
         samples, labels=labels, show_titles=True, title_fmt='.2f',
         title_kwargs={'fontsize': 10}, quantiles=[0.16, 0.5, 0.84],
         label_kwargs={'fontsize': 11}, color=color,
         hist_kwargs={'density': True}, plot_density=True,
+        truths=truths, truth_color='crimson',
     )
     fig.suptitle(f'{title} (N={len(samples)})', y=1.01, fontsize=13)
     fig.savefig(save_path, dpi=120, bbox_inches='tight')
@@ -137,24 +180,23 @@ def main(config):
     with open(round_dir / 'diagnostics.json', 'w') as f:
         json.dump(diagnostics, f, indent=2)
 
+    truths = resolve_truths(config.target)
+    if truths is not None:
+        print(f'[Plot] Marking truth: '
+              f'{dict(zip(prior.PARAM_NAMES, truths))}')
+
     plot_corner(
         proposal_phys, prior.PARAM_NAMES, round_dir / 'proposal_corner.png',
-        'Proposal samples')
+        'Proposal samples', truths=truths)
     plot_corner(
         posterior_phys, prior.PARAM_NAMES, round_dir / 'posterior_corner.png',
-        'Posterior samples', color='darkorange')
+        'Posterior samples', color='darkorange', truths=truths)
 
-    print('[Simulate] Running Agama simulation batch...')
+    print('[Simulate] Running simulation batch...')
     sim_cfg = config.simulation
-    # Particle count is fixed by the stream snapshot (sims.META
-    # ['num_particles']), not per-simulation-configurable - see
-    # tsnpe.sims.simulate_one.
-    # seed: each row gets its own spawned realization. Left out, every
-    # stream reuses the same release times and spray offsets, so only
-    # theta varies across the round's dataset.
     theta, posvel_list = run_simulation_batch(
-        proposal_phys, n_jobs=sim_cfg.n_jobs,
-        use_multiprocessing=sim_cfg.use_multiprocessing,
+        proposal_phys, num_particles=sim_cfg.n_particles,
+        n_jobs=sim_cfg.n_jobs, use_multiprocessing=sim_cfg.use_multiprocessing,
         sample_threads=sim_cfg.sample_threads, seed=sim_seed)
 
     data_path = round_dir / 'data.hdf5'
@@ -164,8 +206,12 @@ def main(config):
             'name': f'{target.key}_tsnpe_round{r}', 'round': r,
             'seed': sim_seed,
             'n_sims_requested': config.proposal.n_sims,
-            'tau': diagnostics['tau'],
-            'acceptance_rate': diagnostics['acceptance_rate'],
+            # Carried verbatim rather than cherry-picked: the two
+            # sampling_modes report different fields ('rejection' gives
+            # acceptance_rate/n_accepted, 'sir' gives ess_total/n_total),
+            # and naming one of them here KeyErrors under the other. All
+            # of them are scalars, so they store as HDF5 attrs unchanged.
+            **diagnostics,
         },
     )
     n_success = len(posvel_list)

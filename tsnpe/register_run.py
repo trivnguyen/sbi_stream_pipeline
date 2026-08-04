@@ -77,10 +77,9 @@ def register_target(config, state: RunState) -> None:
     target.save(npz_path)
 
     state.register_target(
-        npz_path, key=config.target.key,
-        catalog_path=config.target.catalog_path,
-        n_stars=len(target.ra_deg))
-    print(f"[Target] Registered {len(target.ra_deg)} stars -> {npz_path}")
+        npz_path, catalog_path=config.target.catalog_path,
+        n_stars=len(target.phi1))
+    print(f"[Target] Registered {len(target.phi1)} stars -> {npz_path}")
 
 
 def _resolve_configs(full_config, pretrained_config):
@@ -89,12 +88,27 @@ def _resolve_configs(full_config, pretrained_config):
     pre_transforms_config = (
         pretrained_config.get('pre_transforms_override')
         or full_config.get('pre_transforms'))
+    # Everything TrackProjection's constructor takes, plus the column
+    # order every later stage needs. `feat_labels` is not derivable from
+    # the data: `stream_sims` writes its own NODE_FEATURE_NAMES order,
+    # which is not the order the model was trained on, so the columns
+    # have to be selected by name against this list.
+    track_config = ConfigDict(dict(
+        track_path=full_config.get('track_path'),
+        track_project_pos=full_config.get('track_project_pos'),
+        feat_labels=list(full_config.get('feat_labels') or ()))
+    )
+    if not track_config.feat_labels:
+        raise ValueError(
+            "No feat_labels found for this checkpoint. It records the node-"
+            "feature column order the model was trained on, which the "
+            "simulator's own ordering does not match.")
     if not pre_transforms_config:
         raise ValueError(
             "No pre_transforms found (locally or on wandb) for this "
             "checkpoint, and config.pretrained.pre_transforms_override "
             "is not set.")
-    return model_config, pre_transforms_config
+    return model_config, pre_transforms_config, track_config
 
 
 def _find_config_snapshot(checkpoint_path: str, max_levels: int = 3) -> Path | None:
@@ -144,20 +158,22 @@ def _resolve_checkpoint(pretrained_config):
                 "local_checkpoint_dir to fetch from wandb instead.")
 
         full_config = ConfigDict(json.loads(snapshot_path.read_text()))
-        model_config, pre_transforms_config = _resolve_configs(full_config, pretrained_config)
+        model_config, pre_transforms_config, track_config = _resolve_configs(
+            full_config, pretrained_config)
         provenance = {
             'source': 'local_offline',
             'local_checkpoint_dir': pretrained_config.local_checkpoint_dir,
         }
-        return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance
+        return checkpoint_path, model_config, pre_transforms_config, track_config, norm_dict, provenance
 
     checkpoint_path, full_config = utils.fetch_wandb_checkpoint(
         run_path=pretrained_config.wandb_run_path,
         version=pretrained_config.get('wandb_version', 'best'))
-    model_config, pre_transforms_config = _resolve_configs(full_config, pretrained_config)
+    model_config, pre_transforms_config, track_config = _resolve_configs(
+        full_config, pretrained_config)
     norm_dict = _norm_dict_from_checkpoint(checkpoint_path)
     provenance = {'source': 'wandb', 'wandb_run_path': pretrained_config.wandb_run_path}
-    return checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance
+    return checkpoint_path, model_config, pre_transforms_config, track_config, norm_dict, provenance
 
 
 def register_pretrained(config, state: RunState) -> None:
@@ -180,7 +196,7 @@ def register_pretrained(config, state: RunState) -> None:
         provenance = {'source': 'random_init'}
     else:
         print("[Base] Resolving pretrained checkpoint...")
-        checkpoint_path, model_config, pre_transforms_config, norm_dict, provenance = \
+        checkpoint_path, model_config, pre_transforms_config, track_config, norm_dict, provenance = \
             _resolve_checkpoint(config.pretrained)
         shutil.copy2(checkpoint_path, ckpt_dst)
 
@@ -196,8 +212,12 @@ def register_pretrained(config, state: RunState) -> None:
     with open(pre_transforms_config_dst, 'w') as f:
         json.dump(_to_plain_dict(pre_transforms_config), f, indent=2)
 
+    track_config_dst = round0_dir / 'track_config.json'
+    with open(track_config_dst, 'w') as f:
+        json.dump(_to_plain_dict(track_config), f, indent=2)
+
     state.register_base(
-        ckpt_dst, norm_dict_dst, model_config_dst, pre_transforms_config_dst,
+        ckpt_dst, norm_dict_dst, model_config_dst, pre_transforms_config_dst, track_config_dst,
         **provenance)
     print(f"[Base] Registered round-0 model -> {round0_dir}")
 

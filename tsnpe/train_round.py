@@ -33,32 +33,63 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tsnpe.state import RunState, SEED_OFFSET
 from tsnpe.model_io import build_npe
+from tsnpe import datasets
+from tsnpe.transforms import build_transformation, TrackProjection
 from stream_sims import prior
 
-from jgnn import datasets, training
-from jgnn.transforms import build_transformation
+from jgnn import training
 from jgnn.callbacks.visualization import NPEVisualizationCallback
 
 
-def prepare_data(config, data_path, norm_dict, pre_transforms_config):
-    """Build train/val dataloaders from one round's simulated Cartesian dataset.
+def load_track(track_config):
+    """Rebuild the round-0 model's TrackProjection, or None if it had none.
+
+    The projection is part of the model's pre_transforms, so a round that
+    trains without it feeds the embedding raw coordinates normalized by
+    offset statistics -- silently, since norm_dict is fixed at round 0.
 
     Args:
-        config: Pipeline config (see configs/debug.py).
-        data_path: Path to the round's data.hdf5 (tsnpe/sims.py's output).
+        track_config: Parsed round_0/track_config.json.
+
+    Returns:
+        A `TrackProjection`, or None when `track_path` is unset.
+    """
+    if not track_config.get('track_path'):
+        print('[Track] No track_path: training on raw coordinates')
+        return None
+    track = TrackProjection(
+        track_config['track_path'], track_config['feat_labels'],
+        project_pos=track_config.get('track_project_pos', True))
+    print(f'[Track] {track}')
+    return track
+
+
+def prepare_data(config, data_path, norm_dict, pre_transforms_config,
+                 feat_labels, track=None):
+    """Build train/val dataloaders from one round's simulated dataset.
+
+    Args:
+        config: Pipeline config (see configs/example_aau.py).
+        data_path: Path to the round's data.hdf5 (simulate_round.py's output).
         norm_dict: Fixed normalization dict (reused, never recomputed).
         pre_transforms_config: The round-0 model's pre_transforms config
             (state.pre_transforms_config_path()).
+        feat_labels: Node-feature column order the model was trained on.
+        track: `TrackProjection` or None. Only needed to measure the
+            normalization, and norm_dict is always supplied here, so it
+            is passed for completeness rather than effect.
 
     Returns:
         Tuple of (train_loader, val_loader).
     """
-    node_feats, graph_feats, _ = datasets.read_graph_dataset(str(data_path), concat=True)
+    node_feats, graph_feats, _ = datasets.read_graph_dataset(
+        str(data_path), concat=True)
     seed_data = config.seed + config.round + SEED_OFFSET
 
+    # No cond_labels: this project's model has no conditioning dimension
+    # (see tsnpe.proposal's module docstring).
     train_loader, val_loader, _ = datasets.cartesian.prepare_dataloaders(
-        node_feats, graph_feats, prior.PARAM_NAMES,
-        cond_labels=[prior.CONDITIONING_NAME],
+        node_feats, graph_feats, feat_labels, prior.PARAM_NAMES,
         train_batch_size=config.training.train_batch_size,
         eval_batch_size=config.training.eval_batch_size,
         train_frac=config.training.train_frac,
@@ -66,6 +97,7 @@ def prepare_data(config, data_path, norm_dict, pre_transforms_config):
         seed=seed_data,
         norm_dict=norm_dict,
         pre_transform_kwargs=pre_transforms_config,
+        track=track,
     )
     return train_loader, val_loader
 
@@ -147,14 +179,20 @@ def main(config):
     norm_dict = json.loads(state.norm_dict_path().read_text())
     model_config = ConfigDict(json.loads(state.model_config_path().read_text()))
     pre_transforms_config = json.loads(state.pre_transforms_config_path().read_text())
+    track_config = json.loads(state.track_config_path().read_text())
 
     print(f'=== Round {r}: train ===')
+    track = load_track(track_config)
+
     print(f'[Data] Loading {data_path}')
-    train_loader, val_loader = prepare_data(config, data_path, norm_dict, pre_transforms_config)
+    train_loader, val_loader = prepare_data(
+        config, data_path, norm_dict, pre_transforms_config,
+        track_config['feat_labels'], track=track)
     print(f'[Data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}')
 
     print('[Transforms] Building pre-transforms...')
-    pre_transforms = build_transformation(norm_dict=norm_dict, **pre_transforms_config)
+    pre_transforms = build_transformation(
+        norm_dict=norm_dict, track=track, **pre_transforms_config)
 
     print('[Model] Creating NPE model...')
     model = build_npe(

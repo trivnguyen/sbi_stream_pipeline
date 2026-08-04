@@ -170,6 +170,7 @@ class RunState:
     def register_base(
         self, checkpoint_path: Path, norm_dict_path: Path,
         model_config_path: Path, pre_transforms_config_path: Path,
+        track_config_path: Path,
         **provenance: Any,
     ) -> None:
         """Record the round-0 base model (already copied into run_dir).
@@ -180,6 +181,7 @@ class RunState:
             model_config_path: Path to the extracted model_config.json, inside run_dir.
             pre_transforms_config_path: Path to the extracted
                 pre_transforms_config.json, inside run_dir.
+            track_config_path: Path to the extracted track_config.json, inside run_dir.
             **provenance: Extra fields to store verbatim (e.g. wandb_run_path)
                 for traceability back to the source run.
         """
@@ -189,6 +191,7 @@ class RunState:
             'model_config_path': str(model_config_path.relative_to(self.run_dir)),
             'pre_transforms_config_path':
                 str(pre_transforms_config_path.relative_to(self.run_dir)),
+            'track_config_path': str(track_config_path.relative_to(self.run_dir)),
             **provenance,
         }
         self.save()
@@ -221,6 +224,10 @@ class RunState:
     def pre_transforms_config_path(self) -> Path:
         """Absolute path to the run's (fixed, round-0) pre_transforms_config.json."""
         return self.resolve(self.require_base('pre_transforms_config_path'))
+
+    def track_config_path(self) -> Path:
+        """Absolute path to the run's (fixed, round-0) track_config.json."""
+        return self.resolve(self.require_base('track_config_path'))
 
     # ------------------------------------------------------------------
     # Rounds (>= 1)

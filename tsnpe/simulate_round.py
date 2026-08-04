@@ -30,6 +30,7 @@ from tsnpe.state import RunState
 from tsnpe.target import TargetData
 from tsnpe.proposal import sample_tsnpe_proposal
 from tsnpe.model_io import build_npe
+from tsnpe.transforms import TrackProjection
 from stream_sims import prior
 from stream_sims.sims import run_simulation_batch, write_graph_dataset
 
@@ -76,9 +77,14 @@ def main(config):
               f'({state.data_path(r)}). Nothing to do.')
         return
 
-    pl.seed_everything(config.seed + r)
-    np.random.seed(config.seed + r)
-
+    # Round-specific children of the run seed, rather than
+    # `config.seed + r`: that collides across runs (seed 0 round 1 is
+    # seed 1 round 0) and reuses one stream for both consumers.
+    global_seq, sim_seq = np.random.SeedSequence([config.seed, r]).spawn(2)
+    # seed_everything covers random/numpy/torch; generate_state is uint32,
+    # which is exactly its allowed range.
+    pl.seed_everything(int(global_seq.generate_state(1)[0]))
+    sim_seed = int(sim_seq.generate_state(1)[0])
 
     round_dir = state.run_dir / f'round_{r}'
     round_dir.mkdir(parents=True, exist_ok=True)
@@ -89,7 +95,17 @@ def main(config):
     norm_dict = json.loads(state.norm_dict_path().read_text())
     model_config = ConfigDict(json.loads(state.model_config_path().read_text()))
     pre_transforms_config = json.loads(state.pre_transforms_config_path().read_text())
+    track_config = json.loads(state.track_config_path().read_text())
     prev_checkpoint = state.checkpoint_path(r - 1)
+
+    # Same projection the model was trained under. Without it the
+    # observation reaches the embedding as raw coordinates normalized by
+    # track-offset statistics, and the proposal is drawn from garbage.
+    track = (TrackProjection(
+        track_config['track_path'], track_config['feat_labels'],
+        project_pos=track_config.get('track_project_pos', True))
+        if track_config.get('track_path') else None)
+    print(f'[Track] {track}')
 
     print(f'[Model] Warm-starting from round {r - 1}: {prev_checkpoint}')
     # pre_transforms=None: sample_tsnpe_proposal always builds its own
@@ -104,7 +120,7 @@ def main(config):
 
     print('[Proposal] Sampling TSNPE-truncated proposal...')
     proposal_phys, diagnostics, posterior_phys = sample_tsnpe_proposal(
-        model, target, norm_dict, pre_transforms_config,
+        model, target, norm_dict, pre_transforms_config, track=track,
         return_posterior=True, **config.proposal)
     print(f'  proposal_phys : {proposal_phys.shape}')
     print(f'  diagnostics   : {diagnostics}')
@@ -126,16 +142,20 @@ def main(config):
     # Particle count is fixed by the stream snapshot (sims.META
     # ['num_particles']), not per-simulation-configurable - see
     # tsnpe.sims.simulate_one.
+    # seed: each row gets its own spawned realization. Left out, every
+    # stream reuses the same release times and spray offsets, so only
+    # theta varies across the round's dataset.
     theta, posvel_list = run_simulation_batch(
         proposal_phys, n_jobs=sim_cfg.n_jobs,
         use_multiprocessing=sim_cfg.use_multiprocessing,
-        sample_threads=sim_cfg.sample_threads)
+        sample_threads=sim_cfg.sample_threads, seed=sim_seed)
 
     data_path = round_dir / 'data.hdf5'
     write_graph_dataset(
         str(data_path), theta, posvel_list, prior.PARAM_NAMES,
         headers={
             'name': f'{target.key}_tsnpe_round{r}', 'round': r,
+            'seed': sim_seed,
             'n_sims_requested': config.proposal.n_sims,
             'tau': diagnostics['tau'],
             'acceptance_rate': diagnostics['acceptance_rate'],

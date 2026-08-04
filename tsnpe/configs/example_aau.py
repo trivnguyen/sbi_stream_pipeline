@@ -24,28 +24,20 @@ from ml_collections.config_dict import placeholder
 def get_config() -> ConfigDict:
     config = ConfigDict()
 
-    config.run_dir = '/scratch/tvnguyen/trained_models/tsnpe/test'
+    config.run_dir = '/scratch/tvnguyen/trained_models/tsnpe/test_stream'
     config.seed = 0
     config.round = placeholder(int)
-    config.overwrite = False
+    config.overwrite = True
 
     config.target = ConfigDict()
-    config.target.key = 'draco_1'
-    config.target.catalog_path = (
-        '/home/tvnguyen/links/my_projects/mock_catalogs/icrs/'
-        'draco1_desi_icrs/CuspOM_mock_catalog.csv'
-    )
-    config.target.catalog_kwargs = ConfigDict()
-    config.target.catalog_kwargs.source = 'mock_icrs'
-    config.target.catalog_kwargs.mem_prob_min = 0.8
-    config.target.catalog_kwargs.vlos_abs_max = 50.0
-    config.target.catalog_kwargs.apply_perspective_corr = True
+    config.target.catalog_path = '/scratch/tvnguyen/stream_datasets/observations/aau_mock_v1.csv'
+    config.target.key = 'aau_mock_v1'
 
     config.pretrained = ConfigDict()
-    config.pretrained.random_init = False
-    config.pretrained.wandb_run_path = 'sbi_dsph/8p_ZhaoPlumCOM/sfaqzcwx'
+    config.pretrained.random_init = False  # for debug only
+    config.pretrained.wandb_run_path = 'desc_sbi_stream/jgnn-tsnpe/runs/dl04wm57'
     config.pretrained.wandb_version = 'best'
-    config.pretrained.local_checkpoint_dir = '/scratch/tvnguyen/trained_models/npe/8p_ZhaoPlumCOM/sfaqzcwx/checkpoints'
+    config.pretrained.local_checkpoint_dir = '/scratch/tvnguyen/trained_models/npe/9p_AAU_deltaVmin0p03/dl04wm57/checkpoints'
     config.pretrained.local_checkpoint_filename = 'last.ckpt'
 
     config.proposal = ConfigDict()
@@ -59,8 +51,6 @@ def get_config() -> ConfigDict:
     config.proposal.prior_n_sigma = 5.0
 
     config.simulation = ConfigDict()
-    # Particle count is fixed by the stream snapshot (sims.META
-    # ['num_particles']) - no per-simulation count to configure here.
     config.simulation.n_jobs = 0
     config.simulation.use_multiprocessing = True
     config.simulation.sample_threads = 1
@@ -73,7 +63,7 @@ def get_config() -> ConfigDict:
     config.training.workdir = placeholder(str)
     config.training.id = placeholder(str)
     config.training.wandb_project = 'jgnn-tsnpe'
-    config.training.entity = 'sbi_dsph'
+    config.training.entity = 'desc_sbi_stream'
     config.training.debug = False
     config.training.enable_progress_bar = True
     config.training.accelerator = 'gpu'
@@ -81,8 +71,8 @@ def get_config() -> ConfigDict:
     config.training.eval_batch_size = 128
     config.training.train_frac = 0.9
     config.training.num_workers = 0
-    config.training.num_epochs = -1
-    config.training.num_steps = 20_000
+    config.training.num_epochs = 40
+    config.training.num_steps = -1
     config.training.patience = 20
     config.training.gradient_clip_val = 0.5
 
@@ -93,10 +83,14 @@ def get_config() -> ConfigDict:
 
     config.training.scheduler = ConfigDict()
     config.training.scheduler.name = 'WarmUpCosineAnnealingLR'
-    config.training.scheduler.decay_steps = 20_000
-    config.training.scheduler.warmup_steps = 2_000
-    config.training.scheduler.eta_min = 1e-6
-    config.training.scheduler.interval = 'step'
+    config.training.scheduler.decay_steps = 40
+    config.training.scheduler.warmup_steps = 2
+    # A multiplier on the base lr, not a floor -- jgnn's
+    # WarmUpCosineAnnealingLR is a LambdaLR. With lr=1e-4 this anneals to
+    # 1e-6, matching the npe config it warm-starts from. Setting it to
+    # 1e-6 directly (as it read before) annealed to 1e-10 instead.
+    config.training.scheduler.eta_min = 1e-2
+    config.training.scheduler.interval = 'epoch'
 
     config.training.enable_visualization_callback = True
     config.training.visualization = ConfigDict()

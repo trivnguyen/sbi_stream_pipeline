@@ -15,15 +15,14 @@ from scipy.special import logsumexp
 from torch_geometric.data import Data, Batch
 from tqdm import tqdm
 
-from jgnn.transforms import build_transformation
-
-from stream_sims import prior as prior_lib
+from .transforms import build_transformation
+from .prior import Prior
 from .target import TargetData
 
-_PRIOR = prior_lib.Prior()
+_PRIOR = Prior()
 
 
-def build_obs_pre_transforms(pre_transforms_config: dict, norm_dict: dict):
+def build_obs_pre_transforms(pre_transforms_config: dict, norm_dict: dict, track=None):
     """Pre-transforms for a real observation graph.
 
     Graph construction and normalization exactly match the model's own
@@ -33,7 +32,7 @@ def build_obs_pre_transforms(pre_transforms_config: dict, norm_dict: dict):
     forced off, since the observation's x is already computed manually
     (_x_obs_features) and it's a single graph, not a batch.
     """
-    return build_transformation(norm_dict=norm_dict, **{
+    return build_transformation(norm_dict=norm_dict, track=track, **{
         **pre_transforms_config,
         'apply_projection': False,
         'apply_selection': False,
@@ -43,16 +42,15 @@ def build_obs_pre_transforms(pre_transforms_config: dict, norm_dict: dict):
 
 
 def _x_obs_features(target: TargetData) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build the (x, pos) node-feature tensors for the observed stream.
+    """Build the (x, pos) node-feature tensors for the observed stream."""
+    pos = np.stack([target.phi1, target.phi2], axis=1)
+    x = np.stack([
+        target.phi1, target.phi2, target.vr, target.pm1, target.pm2, target.dist,
+        target.vr_err, target.pm1_err, target.pm2_err, target.dist_err
+    ], axis=1)
 
-    Blocked on tsnpe.target.TargetData's stream-specific redesign (not
-    implemented yet). Likely shape once that lands: pos=(phi1, phi2)
-    (spatial), x=(dist, pm1, pm2, vr[, uncertainties]) (mirroring
-    NODE_FEATURE_NAMES in sims.py, minus the spatial columns).
-    """
-    raise NotImplementedError(
-        "_x_obs_features depends on tsnpe.target.TargetData's stream "
-        "redesign, which is not implemented yet.")
+    return torch.tensor(x, dtype=torch.float32), torch.tensor(pos, dtype=torch.float32)
+
 
 
 def _embed_observation(model, obs_graph) -> torch.Tensor:
@@ -91,6 +89,7 @@ def sample_posterior(
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
+    track=None,
     n_samples: int = 2000,
     return_log_prob: bool = False,
 ) -> np.ndarray:
@@ -118,7 +117,8 @@ def sample_posterior(
         RuntimeError: If every posterior sample falls outside the prior box.
     """
     model.eval()
-    pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
+    pre_transforms = build_obs_pre_transforms(
+        pre_transforms_config, norm_dict, track=track)
     x, pos = _x_obs_features(target)
     obs_graph = pre_transforms(Data(x=x, pos=pos))
     graph_embedding = _embed_observation(model, obs_graph)
@@ -154,6 +154,7 @@ def estimate_tau(
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
+    track=None,
     epsilon: float = 1e-3,
     n_post_samples: int = 50_000,
     return_posterior: bool = False,
@@ -179,7 +180,7 @@ def estimate_tau(
         RuntimeError: If every posterior sample falls outside the prior box.
     """
     posterior, log_q = sample_posterior(
-        model, target, norm_dict, pre_transforms_config,
+        model, target, norm_dict, pre_transforms_config, track,
         n_samples=n_post_samples, return_log_prob=True)
 
     tau = float(np.quantile(log_q, epsilon))
@@ -315,6 +316,7 @@ def sample_tsnpe_proposal(
     target: TargetData,
     norm_dict: dict,
     pre_transforms_config: dict,
+    track=None,
     n_sims: int = 1000,
     epsilon: float = 1e-3,
     n_post_samples: int = 50_000,
@@ -342,6 +344,8 @@ def sample_tsnpe_proposal(
             never recomputed across rounds).
         pre_transforms_config: The model's own pre_transforms config (e.g.
             config.pre_transforms) - see build_obs_pre_transforms.
+        track: Optional TrackProjection to apply to the observation before
+            embedding. If None, no track is applied.
         n_sims: Number of proposal draws to return.
         epsilon: Posterior mass fraction excluded when calibrating tau.
         n_post_samples: Total posterior samples drawn to calibrate tau.
@@ -370,12 +374,13 @@ def sample_tsnpe_proposal(
     """
     model.eval()
     tau_result = estimate_tau(
-        model, target, norm_dict, pre_transforms_config,
+        model, target, norm_dict, pre_transforms_config, track=track,
         epsilon=epsilon, n_post_samples=n_post_samples,
         return_posterior=return_posterior)
     tau, posterior_phys = tau_result if return_posterior else (tau_result, None)
 
-    pre_transforms = build_obs_pre_transforms(pre_transforms_config, norm_dict)
+    pre_transforms = build_obs_pre_transforms(
+        pre_transforms_config, norm_dict, track=track)
     x, pos = _x_obs_features(target)
     obs_graph = pre_transforms(Data(x=x, pos=pos))
     graph_embedding = _embed_observation(model, obs_graph)

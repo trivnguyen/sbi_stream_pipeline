@@ -16,6 +16,13 @@ import warnings
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
+# As npe/simulate_process.py: make single-threaded OpenMP the process-wide
+# default, so each of the n_jobs worker processes runs one thread instead
+# of one per core. Without it the pool oversubscribes by n_workers-fold,
+# which is slower than running serially. Must be set before the import
+# chain that reaches agama, i.e. before stream_sims below.
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+
 import corner
 import matplotlib.pyplot as plt
 import numpy as np

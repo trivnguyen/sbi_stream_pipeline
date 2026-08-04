@@ -24,10 +24,15 @@ from ml_collections.config_dict import placeholder
 def get_config() -> ConfigDict:
     config = ConfigDict()
 
-    config.run_dir = '/scratch/tvnguyen/trained_models/tsnpe/test_stream'
+    config.run_dir = '/scratch/tvnguyen/trained_models/tsnpe/'
     config.seed = 0
     config.round = placeholder(int)
-    config.overwrite = True
+    # register_run.py rmtree's run_dir when this is True, and
+    # run_pipeline.sh runs register_run.py on every submission -- so True
+    # means a resubmit deletes round_0 and every finished round rather
+    # than resuming. Registration is already state.json-gated and no-ops
+    # on its own. Set True by hand only to deliberately start over.
+    config.overwrite = False
 
     config.target = ConfigDict()
     config.target.catalog_path = '/scratch/tvnguyen/stream_datasets/observations/aau_mock_v1.csv'

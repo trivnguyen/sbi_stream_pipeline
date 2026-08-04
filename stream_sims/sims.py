@@ -298,7 +298,11 @@ def run_simulation_batch(
                 feats_list.append(feats)
         return np.array(theta_list), feats_list
 
-    n_workers = n_jobs or os.cpu_count()
+    # sched_getaffinity, not cpu_count: under SLURM the latter reports the
+    # whole node (96 CPUs on Trillium's compute nodes) rather than the
+    # cpus-per-task the job actually holds, so `n_jobs=0` oversubscribed
+    # the allocation several times over.
+    n_workers = n_jobs or len(os.sched_getaffinity(0))
     with ProcessPoolExecutor(
         max_workers=n_workers, initializer=_init_worker,
         initargs=(sample_threads,),

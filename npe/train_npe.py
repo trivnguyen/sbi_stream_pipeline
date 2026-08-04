@@ -21,7 +21,7 @@ from ml_collections import config_flags
 
 from jgnn import training
 from jgnn.models import NPE, GNNEmbedding
-from jgnn.transforms import build_transformation
+from transforms import TrackProjection, build_transformation
 from jgnn.callbacks.visualization import NPEVisualizationCallback
 import datasets
 
@@ -52,7 +52,67 @@ def save_config_snapshot(
         shutil.copy2(config_path, snapshot_dir / 'config_snapshot.py')
 
 
-def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
+def load_track(config: ml_collections.ConfigDict, snapshot_dir: Path = None):
+    """Load the unperturbed stream track, if this run uses one.
+
+    Fitted separately by `stream_sims.track`, and shared verbatim with the
+    NLE pipeline so both estimators reference the same stream. Applied as
+    the first stage of the model's own pre_transforms, ahead of the
+    measurement model and of graph construction.
+
+    Unlike the NLE side, the checkpoint cannot carry it: the model is
+    jgnn's and rebuilds its pipeline from the config. `config_snapshot.json`
+    and the `track_snapshot.npz` copied here are what tie a checkpoint to
+    the track it was trained against.
+
+    Args:
+        config: Full training config.
+        snapshot_dir: Run directory to copy the track into, if given.
+
+    Returns:
+        A `TrackProjection`, or None when `config.track_path` is unset.
+
+    Raises:
+        ValueError: If the run directory already holds a different track.
+    """
+    path = config.get('track_path', None)
+    if path is None:
+        print('[Track] No track_path: training on raw coordinates')
+        return None
+
+    track = TrackProjection(
+        path, config.feat_labels,
+        project_pos=config.get('track_project_pos', True))
+    print(f'[Track] Loaded {path}')
+    print(f'[Track] {track}')
+    print(f"[Track] source stream sha256: "
+          f"{track.meta.get('stream_sha256', 'unknown')}")
+    if track.project_pos:
+        print('[Track] pos is projected too: the kNN graph is built from '
+              'the straightened stream')
+
+    if snapshot_dir is not None:
+        destination = snapshot_dir / 'track_snapshot.npz'
+        if destination.exists():
+            existing = TrackProjection(
+                destination, config.feat_labels,
+                project_pos=track.project_pos)
+            if existing.meta.get('stream_sha256') != track.meta.get(
+                    'stream_sha256'):
+                raise ValueError(
+                    f'{destination} was fitted from a different stream '
+                    f"({existing.meta.get('stream_sha256')} vs "
+                    f"{track.meta.get('stream_sha256')}). Point "
+                    'config.track_path at the one this run was trained '
+                    'with, or start a fresh run.')
+        else:
+            shutil.copy2(path, destination)
+
+    return track
+
+
+def prepare_data(config: ml_collections.ConfigDict, norm_dict=None,
+                 track=None):
     """Load and prepare datasets with transformations.
 
     Args:
@@ -60,6 +120,9 @@ def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
         norm_dict: Fixed normalization dict to reuse (e.g. from a resumed
             checkpoint's own hyper_parameters) instead of computing a fresh
             one from this call's training data.
+        track: TrackProjection used when measuring `norm_dict`, so the
+            stats describe the projected features. Ignored when
+            `norm_dict` is supplied.
 
     Returns:
         Tuple of (train_loader, val_loader, norm_dict)
@@ -93,6 +156,7 @@ def prepare_data(config: ml_collections.ConfigDict, norm_dict=None):
         seed=config.seed_data,
         norm_dict=norm_dict,
         pre_transform_kwargs=dict(config.pre_transforms),
+        track=track,
     )
 
     return train_loader, val_loader, norm_dict
@@ -251,13 +315,17 @@ def main(config: ml_collections.ConfigDict, config_path: str = None):
         norm_dict = resume_checkpoint['hyper_parameters']['norm_dict']
         print("[Checkpoint] Reusing norm_dict from resumed checkpoint")
 
+    print("[Track] Loading stream track...")
+    track = load_track(config, project_dir)
+
     print("[Data] Loading datasets...")
-    train_loader, val_loader, norm_dict = prepare_data(config, norm_dict=norm_dict)
+    train_loader, val_loader, norm_dict = prepare_data(
+        config, norm_dict=norm_dict, track=track)
     print(f"[Data] Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     print("[Transforms] Building pre-transforms...")
     pre_transforms = build_transformation(
-        norm_dict=norm_dict, **config.pre_transforms)
+        norm_dict=norm_dict, track=track, **config.pre_transforms)
 
     print("[Model] Creating NPE model...")
     model = create_model(config, pre_transforms, norm_dict)

@@ -59,19 +59,54 @@ TIME="${TIME:-12:00:00}"
 ROUNDS="${ROUNDS:-1}"
 START_ROUND="${START_ROUND:-1}"
 
-# Trailing --flag=value overrides win over the env vars above; anything
-# else (e.g. --config.field=value) passes through to run_pipeline.sh.
+# Trailing overrides win over the env vars above; --config.field=value
+# passes through to run_pipeline.sh and on to python.
+#
+# Both `--flag value` and `--flag=value` are accepted. Taking only the
+# `=` form is what made `--time 12:00:00` look like it did nothing: it
+# fell through to the passthrough branch, reached register_run.py, and
+# died on absl's "Unknown command line flag 'time'" -- 28 seconds into a
+# job that had already been queued at the default time limit.
+#
+# An unrecognized --flag is a hard error for the same reason. Forwarding
+# it silently only defers the failure to the compute node.
+need_value() {
+    if [[ $# -lt 2 ]]; then
+        echo "Error: $1 needs a value (e.g. $1=VALUE or $1 VALUE)." >&2
+        exit 1
+    fi
+}
+
 REMAINING_ARGS=()
-for arg in "${EXTRA_ARGS[@]}"; do
-    case "$arg" in
-        --account=*)      ACCOUNT="${arg#*=}" ;;
-        --partition=*)    PARTITION="${arg#*=}" ;;
-        --gpus=*)         GPUS="${arg#*=}" ;;
-        --cpus=*)         CPUS="${arg#*=}" ;;
-        --time=*)         TIME="${arg#*=}" ;;
-        --rounds=*)       ROUNDS="${arg#*=}" ;;
-        --start-round=*)  START_ROUND="${arg#*=}" ;;
-        *)                REMAINING_ARGS+=("$arg") ;;
+set -- "${EXTRA_ARGS[@]}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --account=*)     ACCOUNT="${1#*=}";     shift   ;;
+        --account)       need_value "$@"; ACCOUNT="$2";     shift 2 ;;
+        --partition=*)   PARTITION="${1#*=}";   shift   ;;
+        --partition)     need_value "$@"; PARTITION="$2";   shift 2 ;;
+        --gpus=*)        GPUS="${1#*=}";        shift   ;;
+        --gpus)          need_value "$@"; GPUS="$2";        shift 2 ;;
+        --cpus=*)        CPUS="${1#*=}";        shift   ;;
+        --cpus)          need_value "$@"; CPUS="$2";        shift 2 ;;
+        --time=*)        TIME="${1#*=}";        shift   ;;
+        --time)          need_value "$@"; TIME="$2";        shift 2 ;;
+        --rounds=*)      ROUNDS="${1#*=}";      shift   ;;
+        --rounds)        need_value "$@"; ROUNDS="$2";      shift 2 ;;
+        --start-round=*) START_ROUND="${1#*=}"; shift   ;;
+        --start-round)   need_value "$@"; START_ROUND="$2"; shift 2 ;;
+        # absl takes --config.x=y and --config.x y; a bare value after the
+        # latter lands in the catch-all below, which is what we want.
+        --config.*)      REMAINING_ARGS+=("$1"); shift ;;
+        --*)
+            echo "Error: unknown option '$1'." >&2
+            echo "Resource flags: --account --partition --gpus --cpus " \
+                 "--time --rounds --start-round" >&2
+            echo "Everything else must be a --config.<field>=<value> " \
+                 "override for python." >&2
+            exit 1
+            ;;
+        *)               REMAINING_ARGS+=("$1"); shift ;;
     esac
 done
 EXTRA_ARGS=("${REMAINING_ARGS[@]}")

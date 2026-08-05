@@ -71,7 +71,7 @@ class Prior:
     # label_ordering's actual order - only on names.
     _idx = {name: i for i, name in enumerate(label_ordering)}
 
-    def __init__(self, prior_min=None, prior_max=None, seed=None):
+    def __init__(self, prior_min=None, prior_max=None, seed=None, delta_vmin=_DELTA_V_MIN):
         """ Initialize the prior box, either from explicit bounds or from the default
         """
         if prior_min is None:
@@ -95,6 +95,7 @@ class Prior:
         self.prior_min, self.prior_max = self._box_bounds()
         self.prior = uniform(self.prior_min, self.prior_max - self.prior_min)
         self._r_accept = None
+        self._delta_vmin = delta_vmin
         self._rng = np.random.default_rng(seed)
 
     def _box_bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -142,7 +143,7 @@ class Prior:
         mass_perturber = 10 ** log_mass * 1e7
         v_rel_mag = np.sqrt(v_rel_perp ** 2 + v_rel_para ** 2)
         delta_v = 2 * _G_UNITS * mass_perturber / (impact_param * v_rel_mag)
-        return delta_v > _DELTA_V_MIN
+        return delta_v > self._delta_vmin
 
     def acceptance_rate(self, n_samples=10_000) -> float:
         """Estimate the delta_V > 3 km/s acceptance rate via Monte Carlo."""
@@ -166,8 +167,11 @@ class Prior:
         while n_collected < n_samples and n_drawn < n_samples * n_oversample_max:
             candidates = self._rvs(n_draw)
             n_drawn += n_draw
-            accepted = self._accept_cols(candidates)
-            batch = candidates[accepted]
+            if self._delta_vmin > 0:
+                accepted = self._accept_cols(candidates)
+                batch = candidates[accepted]
+            else:
+                batch = candidates
             samples.append(batch)
             n_collected += len(batch)
 

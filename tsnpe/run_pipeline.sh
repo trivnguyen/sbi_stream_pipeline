@@ -20,7 +20,7 @@
 # Options
 # -------
 #   --config       PATH   ml_collections config file                 [required]
-#   --rounds       N      Last round to run, inclusive                [default: 1]
+#   --rounds       N      Last round to run, inclusive                [default: 3]
 #   --start-round  R      First round to run                          [default: 1]
 #   (any other --config.<field>=<value> flags are forwarded as-is)
 
@@ -29,7 +29,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG=""
-ROUNDS=1
+ROUNDS=3
 START_ROUND=1
 EXTRA_ARGS=()
 

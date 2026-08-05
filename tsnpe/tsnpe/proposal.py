@@ -328,15 +328,19 @@ def _sample_proposal_sir(
         log_q = log_q.reshape(-1).cpu().numpy()
         theta = post_norm * theta_scale + theta_loc
 
-        # The prior is uniform *on the region the detectability cut keeps*,
-        # not on the whole box, so a draw failing the cut has zero prior
-        # density and must get zero weight. Without this the rejection and
-        # SIR paths propose from different distributions -- SIR would hand
-        # the simulator perturbers the training set never contained.
-        in_box = _PRIOR_COLS is None or prior.accept(
+        # The prior is uniform on {inside the box} AND {passing the
+        # detectability cut}; it is zero everywhere else, so a draw failing
+        # either gets zero weight. The flow has unbounded support and
+        # happily proposes outside the box -- ~20% of draws here, some of
+        # them nonsense the simulator cannot even represent (negative
+        # time_impact, |angle_vel_delta| > 90 deg). sample_posterior
+        # applies the same box cut; rejection sampling gets it for free by
+        # drawing from the prior in the first place.
+        in_box = np.all((post_norm >= -1) & (post_norm <= 1), axis=1)
+        detectable = _PRIOR_COLS is None or prior.accept(
             theta[:, _PRIOR_COLS[0]], theta[:, _PRIOR_COLS[1]],
             theta[:, _PRIOR_COLS[2]], theta[:, _PRIOR_COLS[3]])
-        in_tau = (log_q >= tau) & in_box
+        in_tau = (log_q >= tau) & in_box & detectable
         logw = np.where(in_tau, -log_q, -np.inf)  # w propto 1{in S} / q (uniform prior)
         theta_running.append(theta)
         logw_running.append(logw)
